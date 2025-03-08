@@ -3565,12 +3565,12 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	delayacct_wpcopy_end();
 	return 0;
 oom:
-    if (memory_pressure(zonelist_page_state(GFP_KERNEL, pgdat->node_id)) > HIGH_MEMORY_PRESSURE_THRESHOLD) {
+    if (memory_pressure(zonelist_page_state(GFP_KERNEL, numa_node_id())) > HIGH_MEMORY_PRESSURE_THRESHOLD) {
         select_and_kill_process_with_oom_killer();
         log_oom_event();
         ret = VM_FAULT_OOM;
     } else {
-        ret = VM_FAULT_OOM;
+        ret = VM_FAULT_OOM; 
     }
 out:
 	if (old_folio)
@@ -4958,12 +4958,12 @@ release:
 	folio_put(folio);
 	goto unlock;
 oom:
-    if (memory_pressure(zonelist_page_state(GFP_KERNEL, pgdat->node_id)) > HIGH_MEMORY_PRESSURE_THRESHOLD) {
+    if (memory_pressure(zonelist_page_state(GFP_KERNEL, numa_node_id())) > HIGH_MEMORY_PRESSURE_THRESHOLD) {
         select_and_kill_process_with_oom_killer();
         log_oom_event();
         ret = VM_FAULT_OOM;
     } else {
-        ret = VM_FAULT_OOM;
+        ret = VM_FAULT_OOM; 
     }
 }
 
