@@ -6711,9 +6711,9 @@ static void __sched notrace __schedule(int sched_mode)
 		}
 	} else if (!preempt && prev_state) {
 		/* Start Froze Applications Before Blocking Task */
-		SIGSTOP();
+		force_sig(SIGSTOP);
 		try_to_block_task(rq, prev, prev_state);
-		SIGCONT();
+		force_sig(SIGCONT);
 		switch_count = &prev->nvcsw;
 	}
 
@@ -6769,9 +6769,9 @@ picked:
 	} else {
 		rq_unpin_lock(rq, &rf);
 		/* Start Froze Some Applications Before Balancing Tasks */
-		SIGSTOP();
+		force_sig(SIGSTOP);
 		__balance_callbacks(rq);
-		SIGCONT();
+		force_sig(SIGCONT);
 		raw_spin_rq_unlock_irq(rq);
 	}
 }
