@@ -6644,136 +6644,85 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
  */
 static void __sched notrace __schedule(int sched_mode)
 {
-	struct task_struct *prev, *next;
-	/*
-	 * On PREEMPT_RT kernel, SM_RTLOCK_WAIT is noted
-	 * as a preemption by schedule_debug() and RCU.
-	 */
-	bool preempt = sched_mode > SM_NONE;
-	unsigned long *switch_count;
-	unsigned long prev_state;
-	struct rq_flags rf;
-	struct rq *rq;
-	int cpu;
+    struct task_struct *prev, *next;
+    bool preempt = sched_mode > SM_NONE;
+    unsigned long *switch_count;
+    unsigned long prev_state;
+    struct rq_flags rf;
+    struct rq *rq;
+    int cpu;
 
-	cpu = smp_processor_id();
-	rq = cpu_rq(cpu);
-	prev = rq->curr;
+    cpu = smp_processor_id();
+    rq = cpu_rq(cpu);
+    prev = rq->curr;
 
-	schedule_debug(prev, preempt);
+    schedule_debug(prev, preempt);
 
-	if (sched_feat(HRTICK) || sched_feat(HRTICK_DL))
-		hrtick_clear(rq);
+    if (sched_feat(HRTICK) || sched_feat(HRTICK_DL))
+        hrtick_clear(rq);
 
-	local_irq_disable();
-	rcu_note_context_switch(preempt);
+    local_irq_disable();
+    rcu_note_context_switch(preempt);
 
-	/*
-	 * Make sure that signal_pending_state()->signal_pending() below
-	 * can't be reordered with __set_current_state(TASK_INTERRUPTIBLE)
-	 * done by the caller to avoid the race with signal_wake_up():
-	 *
-	 * __set_current_state(@state)		signal_wake_up()
-	 * schedule()				  set_tsk_thread_flag(p, TIF_SIGPENDING)
-	 *					  wake_up_state(p, state)
-	 *   LOCK rq->lock			    LOCK p->pi_state
-	 *   smp_mb__after_spinlock()		    smp_mb__after_spinlock()
-	 *     if (signal_pending_state())	    if (p->state & @state)
-	 *
-	 * Also, the membarrier system call requires a full memory barrier
-	 * after coming from user-space, before storing to rq->curr; this
-	 * barrier matches a full barrier in the proximity of the membarrier
-	 * system call exit.
-	 */
-	rq_lock(rq, &rf);
-	smp_mb__after_spinlock();
+    rq_lock(rq, &rf);
+    smp_mb__after_spinlock();
 
-	/* Promote REQ to ACT */
-	rq->clock_update_flags <<= 1;
-	update_rq_clock(rq);
-	rq->clock_update_flags = RQCF_UPDATED;
+    /* Promote REQ to ACT */
+    rq->clock_update_flags <<= 1;
+    update_rq_clock(rq);
+    rq->clock_update_flags = RQCF_UPDATED;
 
-	switch_count = &prev->nivcsw;
+    switch_count = &prev->nivcsw;
+    preempt = sched_mode == SM_PREEMPT;
 
-	/* Task state changes only considers SM_PREEMPT as preemption */
-	preempt = sched_mode == SM_PREEMPT;
+    prev_state = READ_ONCE(prev->__state);
+    if (sched_mode == SM_IDLE) {
+        if (!rq->nr_running && !scx_enabled()) {
+            next = prev;
+            goto picked;
+        }
+    } else if (!preempt && prev_state) {
+        /*
+         * Use proper scheduler state management instead of signals.
+         * try_to_block_task() already handles state transitions.
+         */
+        switch_count = &prev->nvcsw;
+        try_to_block_task(rq, prev, prev_state);
+    }
 
-	/*
-	 * We must load prev->state once (task_struct::state is volatile), such
-	 * that we form a control dependency vs deactivate_task() below.
-	 */
-	prev_state = READ_ONCE(prev->__state);
-	if (sched_mode == SM_IDLE) {
-		/* SCX must consult the BPF scheduler to tell if rq is empty */
-		if (!rq->nr_running && !scx_enabled()) {
-			next = prev;
-			goto picked;
-		}
-	} else if (!preempt && prev_state) {
-		/* Start Froze Applications Before Blocking Task */
-		force_sig(SIGSTOP);
-		try_to_block_task(rq, prev, prev_state);
-		force_sig(SIGCONT);
-		switch_count = &prev->nvcsw;
-	}
+    next = pick_next_task(rq, prev, &rf);
+    rq_set_donor(rq, next);
 
-	next = pick_next_task(rq, prev, &rf);
-	rq_set_donor(rq, next);
 picked:
-	clear_tsk_need_resched(prev);
-	clear_preempt_need_resched();
+    clear_tsk_need_resched(prev);
+    clear_preempt_need_resched();
 #ifdef CONFIG_SCHED_DEBUG
-	rq->last_seen_need_resched_ns = 0;
+    rq->last_seen_need_resched_ns = 0;
 #endif
 
-	if (likely(prev != next)) {
-		rq->nr_switches++;
-		/*
-		 * RCU users of rcu_dereference(rq->curr) may not see
-		 * changes to task_struct made by pick_next_task().
-		 */
-		RCU_INIT_POINTER(rq->curr, next);
-		/*
-		 * The membarrier system call requires each architecture
-		 * to have a full memory barrier after updating
-		 * rq->curr, before returning to user-space.
-		 *
-		 * Here are the schemes providing that barrier on the
-		 * various architectures:
-		 * - mm ? switch_mm() : mmdrop() for x86, s390, sparc, PowerPC,
-		 *   RISC-V.  switch_mm() relies on membarrier_arch_switch_mm()
-		 *   on PowerPC and on RISC-V.
-		 * - finish_lock_switch() for weakly-ordered
-		 *   architectures where spin_unlock is a full barrier,
-		 * - switch_to() for arm64 (weakly-ordered, spin_unlock
-		 *   is a RELEASE barrier),
-		 *
-		 * The barrier matches a full barrier in the proximity of
-		 * the membarrier system call entry.
-		 *
-		 * On RISC-V, this barrier pairing is also needed for the
-		 * SYNC_CORE command when switching between processes, cf.
-		 * the inline comments in membarrier_arch_switch_mm().
-		 */
-		++*switch_count;
+    if (likely(prev != next)) {
+        rq->nr_switches++;
+        RCU_INIT_POINTER(rq->curr, next);
+        ++*switch_count;
 
-		migrate_disable_switch(rq, prev);
-		psi_account_irqtime(rq, prev, next);
-		psi_sched_switch(prev, next, !task_on_rq_queued(prev) ||
-					     prev->se.sched_delayed);
+        migrate_disable_switch(rq, prev);
+        psi_account_irqtime(rq, prev, next);
+        psi_sched_switch(prev, next, !task_on_rq_queued(prev) ||
+                         prev->se.sched_delayed);
 
-		trace_sched_switch(preempt, prev, next, prev_state);
+        trace_sched_switch(preempt, prev, next, prev_state);
 
-		/* Also unlocks the rq: */
-		rq = context_switch(rq, prev, next, &rf);
-	} else {
-		rq_unpin_lock(rq, &rf);
-		/* Start Froze Some Applications Before Balancing Tasks */
-		force_sig(SIGSTOP);
-		__balance_callbacks(rq);
-		force_sig(SIGCONT);
-		raw_spin_rq_unlock_irq(rq);
-	}
+        /* Context switch with proper state management */
+        rq = context_switch(rq, prev, next, &rf);
+    } else {
+        rq_unpin_lock(rq, &rf);
+        /*
+         * Balance callbacks without signal interference.
+         * Scheduler has its own load balancing mechanisms.
+         */
+        __balance_callbacks(rq);
+        raw_spin_rq_unlock_irq(rq);
+    }
 }
 
 void __noreturn do_task_dead(void)

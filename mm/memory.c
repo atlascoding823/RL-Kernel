@@ -5953,103 +5953,103 @@ unlock:
  * and __folio_lock_or_retry().
  */
 static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
-		unsigned long address, unsigned int flags)
+                unsigned long address, unsigned int flags)
 {
-	/* Froze Some Applications Before Performing This Tasks */
-	force_sig(SIGSTOP);
+    struct vm_fault vmf = {
+        .vma = vma,
+        .address = address & PAGE_MASK,
+        .real_address = address,
+        .flags = flags,
+        .pgoff = linear_page_index(vma, address),
+        .gfp_mask = __get_fault_gfp_mask(vma),
+    };
+    struct mm_struct *mm = vma->vm_mm;
+    unsigned long vm_flags = vma->vm_flags;
+    pgd_t *pgd;
+    p4d_t *p4d;
+    vm_fault_t ret;
 
-	struct vm_fault vmf = {
-		.vma = vma,
-		.address = address & PAGE_MASK,
-		.real_address = address,
-		.flags = flags,
-		.pgoff = linear_page_index(vma, address),
-		.gfp_mask = __get_fault_gfp_mask(vma),
-	};
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long vm_flags = vma->vm_flags;
-	pgd_t *pgd;
-	p4d_t *p4d;
-	vm_fault_t ret;
+    /*
+     * Memory fault handling requires careful synchronization.
+     * Use proper locking rather than signal-based approaches
+     */
+    pgd = pgd_offset(mm, address);
+    p4d = p4d_alloc(mm, pgd, address);
+    if (!p4d)
+        return VM_FAULT_OOM;
 
-	pgd = pgd_offset(mm, address);
-	p4d = p4d_alloc(mm, pgd, address);
-	if (!p4d)
-		return VM_FAULT_OOM;
+    vmf.pud = pud_alloc(mm, p4d, address);
+    if (!vmf.pud)
+        return VM_FAULT_OOM;
 
-	vmf.pud = pud_alloc(mm, p4d, address);
-	if (!vmf.pud)
-		return VM_FAULT_OOM;
 retry_pud:
-	if (pud_none(*vmf.pud) &&
-	    thp_vma_allowable_order(vma, vm_flags,
-				TVA_IN_PF | TVA_ENFORCE_SYSFS, PUD_ORDER)) {
-		ret = create_huge_pud(&vmf);
-		if (!(ret & VM_FAULT_FALLBACK))
-			return ret;
-	} else {
-		pud_t orig_pud = *vmf.pud;
+    if (pud_none(*vmf.pud) &&
+        thp_vma_allowable_order(vma, vm_flags,
+                    TVA_IN_PF | TVA_ENFORCE_SYSFS, PUD_ORDER)) {
+        ret = create_huge_pud(&vmf);
+        if (!(ret & VM_FAULT_FALLBACK))
+            return ret;
+    } else {
+        pud_t orig_pud = *vmf.pud;
 
-		barrier();
-		if (pud_trans_huge(orig_pud) || pud_devmap(orig_pud)) {
+        /* Ensure proper memory ordering for concurrent modifications */
+        smp_rmb();
+        if (pud_trans_huge(orig_pud) || pud_devmap(orig_pud)) {
+            if ((flags & FAULT_FLAG_WRITE) && !pud_write(orig_pud)) {
+                ret = wp_huge_pud(&vmf, orig_pud);
+                if (!(ret & VM_FAULT_FALLBACK))
+                    return ret;
+            } else {
+                huge_pud_set_accessed(&vmf, orig_pud);
+                return 0;
+            }
+        }
+    }
 
-			/*
-			 * TODO once we support anonymous PUDs: NUMA case and
-			 * FAULT_FLAG_UNSHARE handling.
-			 */
-			if ((flags & FAULT_FLAG_WRITE) && !pud_write(orig_pud)) {
-				ret = wp_huge_pud(&vmf, orig_pud);
-				if (!(ret & VM_FAULT_FALLBACK))
-					return ret;
-			} else {
-				huge_pud_set_accessed(&vmf, orig_pud);
-				return 0;
-			}
-		}
-	}
+    vmf.pmd = pmd_alloc(mm, vmf.pud, address);
+    if (!vmf.pmd)
+        return VM_FAULT_OOM;
 
-	vmf.pmd = pmd_alloc(mm, vmf.pud, address);
-	if (!vmf.pmd)
-		return VM_FAULT_OOM;
+    /* Handle potential race with concurrent huge pud operations */
+    if (pud_trans_unstable(vmf.pud))
+        goto retry_pud;
 
-	/* Huge pud page fault raced with pmd_alloc? */
-	if (pud_trans_unstable(vmf.pud))
-		goto retry_pud;
+    if (pmd_none(*vmf.pmd) &&
+        thp_vma_allowable_order(vma, vm_flags,
+                    TVA_IN_PF | TVA_ENFORCE_SYSFS, PMD_ORDER)) {
+        ret = create_huge_pmd(&vmf);
+        if (!(ret & VM_FAULT_FALLBACK))
+            return ret;
+    } else {
+        vmf.orig_pmd = pmdp_get_lockless(vmf.pmd);
 
-	if (pmd_none(*vmf.pmd) &&
-	    thp_vma_allowable_order(vma, vm_flags,
-				TVA_IN_PF | TVA_ENFORCE_SYSFS, PMD_ORDER)) {
-		ret = create_huge_pmd(&vmf);
-		if (!(ret & VM_FAULT_FALLBACK))
-			return ret;
-	} else {
-		vmf.orig_pmd = pmdp_get_lockless(vmf.pmd);
+        /* Handle swap/migration entries */
+        if (unlikely(is_swap_pmd(vmf.orig_pmd))) {
+            if (is_pmd_migration_entry(vmf.orig_pmd)) {
+                pmd_migration_entry_wait(mm, vmf.pmd);
+                return 0;
+            }
+            VM_BUG_ON(thp_migration_supported() &&
+                    !is_pmd_migration_entry(vmf.orig_pmd));
+        }
 
-		if (unlikely(is_swap_pmd(vmf.orig_pmd))) {
-			VM_BUG_ON(thp_migration_supported() &&
-					  !is_pmd_migration_entry(vmf.orig_pmd));
-			if (is_pmd_migration_entry(vmf.orig_pmd))
-				pmd_migration_entry_wait(mm, vmf.pmd);
-			return 0;
-		}
-		if (pmd_trans_huge(vmf.orig_pmd) || pmd_devmap(vmf.orig_pmd)) {
-			if (pmd_protnone(vmf.orig_pmd) && vma_is_accessible(vma))
-				return do_huge_pmd_numa_page(&vmf);
+        if (pmd_trans_huge(vmf.orig_pmd) || pmd_devmap(vmf.orig_pmd)) {
+            if (pmd_protnone(vmf.orig_pmd) && vma_is_accessible(vma))
+                return do_huge_pmd_numa_page(&vmf);
 
-			if ((flags & (FAULT_FLAG_WRITE|FAULT_FLAG_UNSHARE)) &&
-			    !pmd_write(vmf.orig_pmd)) {
-				ret = wp_huge_pmd(&vmf);
-				if (!(ret & VM_FAULT_FALLBACK))
-					return ret;
-			} else {
-				huge_pmd_set_accessed(&vmf);
-				return 0;
-			}
-		}
-	}
+            if ((flags & (FAULT_FLAG_WRITE|FAULT_FLAG_UNSHARE)) &&
+                !pmd_write(vmf.orig_pmd)) {
+                ret = wp_huge_pmd(&vmf);
+                if (!(ret & VM_FAULT_FALLBACK))
+                    return ret;
+            } else {
+                huge_pmd_set_accessed(&vmf);
+                return 0;
+            }
+        }
+    }
 
-	force_sig(SIGCONT);
-	return handle_pte_fault(&vmf);
+    return handle_pte_fault(&vmf);
 }
 
 /**
