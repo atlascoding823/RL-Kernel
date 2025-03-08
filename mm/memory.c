@@ -91,6 +91,7 @@
 #include "internal.h"
 #include "swap.h"
 
+#define HIGH_MEMORY_PRESSURE_THRESHOLD 90
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
@@ -3564,9 +3565,13 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	delayacct_wpcopy_end();
 	return 0;
 oom:
-	force_sig(SIGSTOP);
-	force_sig(SIGCONT);
-	ret = VM_FAULT_OOM;
+    if (memory_pressure(zonelist_page_state(GFP_KERNEL, pgdat->node_id)) > HIGH_MEMORY_PRESSURE_THRESHOLD) {
+        select_and_kill_process_with_oom_killer();
+        log_oom_event();
+        ret = VM_FAULT_OOM;
+    } else {
+        ret = VM_FAULT_OOM;
+    }
 out:
 	if (old_folio)
 		folio_put(old_folio);
@@ -4953,9 +4958,13 @@ release:
 	folio_put(folio);
 	goto unlock;
 oom:
-	force_sig(SIGSTOP);
-	force_sig(SIGCONT);
-	return VM_FAULT_OOM;
+    if (memory_pressure(zonelist_page_state(GFP_KERNEL, pgdat->node_id)) > HIGH_MEMORY_PRESSURE_THRESHOLD) {
+        select_and_kill_process_with_oom_killer();
+        log_oom_event();
+        ret = VM_FAULT_OOM;
+    } else {
+        ret = VM_FAULT_OOM;
+    }
 }
 
 /*
