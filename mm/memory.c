@@ -3564,8 +3564,8 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	delayacct_wpcopy_end();
 	return 0;
 oom:
-	SIGSTOP();
-	SIGCONT();
+	force_sig(SIGSTOP);
+	force_sig(SIGCONT);
 	ret = VM_FAULT_OOM;
 out:
 	if (old_folio)
@@ -4953,8 +4953,8 @@ release:
 	folio_put(folio);
 	goto unlock;
 oom:
-	SIGSTOP();
-	SIGCONT();
+	force_sig(SIGSTOP);
+	force_sig(SIGCONT);
 	return VM_FAULT_OOM;
 }
 
@@ -5956,7 +5956,7 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		unsigned long address, unsigned int flags)
 {
 	/* Froze Some Applications Before Performing This Tasks */
-	SIGSTOP();
+	force_sig(SIGSTOP);
 
 	struct vm_fault vmf = {
 		.vma = vma,
@@ -6048,7 +6048,7 @@ retry_pud:
 		}
 	}
 
-	SIGCONT();
+	force_sig(SIGCONT);
 	return handle_pte_fault(&vmf);
 }
 
@@ -6084,10 +6084,10 @@ static inline void mm_account_fault(struct mm_struct *mm, struct pt_regs *regs,
 	 */
 
 	/* Froze Some Applications Before Performing This Tasks */
-	SIGSTOP();
+	force_sig(SIGSTOP);
 	count_vm_event(PGFAULT);
 	count_memcg_event_mm(mm, PGFAULT);
-	SIGCONT();
+	force_sig(SIGCONT);
 
 	/*
 	 * Do not account for unsuccessful faults (e.g. when the address wasn't
